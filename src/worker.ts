@@ -16,7 +16,21 @@ const floorMin = (ms: number) => Math.floor(ms / 60000) * 60000;
 function toNumber(x: any, d = 0) { const n = Number(x); return Number.isFinite(n) ? n : d; }
 
 async function getJSON(url: string) {
-  const r = await fetch(url, { headers: { "User-Agent": BUILD_TAG } });
+  const r = await fetch(url, { headers: { "User-Agent": "cf-worker-crypto-recs/1.1", "accept": "application/json" } });
+  if (r.status === 403) {
+    const body = await r.text();
+    const err: any = new Error(`HTTP 403 for ${url} :: ${body.slice(0,120)}`);
+    err.status = 403;
+    throw err;
+  }
+  if (!r.ok) {
+    const body = await r.text();
+    const err: any = new Error(`HTTP ${r.status} for ${url} :: ${body.slice(0,120)}`);
+    err.status = r.status;
+    throw err;
+  }
+  return r.json();
+} });
   if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
   return r.json();
 }
@@ -38,7 +52,37 @@ async function fetchPremiumIndex(symbol: string) {
 }
 
 async function fetchAggTradesDelta(base: string, path: string, symbol: string, startTime: number, endTime: number) {
-  const url = `${base}${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
+  // Primary attempt: query with explicit time window (1 min)
+  const urlWindow = `${base}${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
+  try {
+    const arr = await getJSON(urlWindow);
+    let delta = 0;
+    for (const t of arr) {
+      const qty = Number((t.q ?? t.l ?? t.quantity) ?? 0);
+      const buyerIsMaker = !!t.m;
+      delta += buyerIsMaker ? -qty : +qty;
+    }
+    return delta;
+  } catch (err: any) {
+    const msg = String(err?.message || "");
+    // Fallback for environments where Binance returns 403 on time-bounded aggTrades
+    if (err?.status === 403 || msg.includes("HTTP 403")) {
+      const urlRecent = `${base}${path}?symbol=${symbol}&limit=1000`;
+      const arr = await getJSON(urlRecent);
+      let delta = 0;
+      for (const t of arr) {
+        const ts = Number(t.T ?? t.time ?? 0);
+        if (ts >= startTime && ts < endTime) {
+          const qty = Number((t.q ?? t.l ?? t.quantity) ?? 0);
+          const buyerIsMaker = !!t.m;
+          delta += buyerIsMaker ? -qty : +qty;
+        }
+      }
+      return delta;
+    }
+    throw err;
+  }
+}${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
   const arr = await getJSON(url);
   let delta = 0;
   for (const t of arr) {
