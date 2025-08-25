@@ -1,5 +1,5 @@
 // Cloudflare Worker — agregator Binance + proste rekomendacje
-// Version: 1.1 (initSchema via batch + logging)
+// Version: 1.2 (batch schema, 403 fallback for aggTrades, fixed HTML escaping)
 export interface Env {
   DB: D1Database;
   SYMBOLS: string;
@@ -10,13 +10,13 @@ export interface Env {
 const FAPI = "https://fapi.binance.com";
 const SPOT = "https://api.binance.com";
 
-const BUILD_TAG = "crypto-recs/1.1";
+const BUILD_TAG = "crypto-recs/1.2";
 const nowMs = () => Date.now();
 const floorMin = (ms: number) => Math.floor(ms / 60000) * 60000;
 function toNumber(x: any, d = 0) { const n = Number(x); return Number.isFinite(n) ? n : d; }
 
 async function getJSON(url: string) {
-  const r = await fetch(url, { headers: { "User-Agent": "cf-worker-crypto-recs/1.1", "accept": "application/json" } });
+  const r = await fetch(url, { headers: { "User-Agent": BUILD_TAG, "accept": "application/json" } });
   if (r.status === 403) {
     const body = await r.text();
     const err: any = new Error(`HTTP 403 for ${url} :: ${body.slice(0,120)}`);
@@ -48,8 +48,8 @@ async function fetchPremiumIndex(symbol: string) {
   };
 }
 
+// AggTrades with 403-safe fallback (no start/end), then filter client-side
 async function fetchAggTradesDelta(base: string, path: string, symbol: string, startTime: number, endTime: number) {
-  // Primary attempt: query with explicit time window (1 min)
   const urlWindow = `${base}${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
   try {
     const arr = await getJSON(urlWindow);
@@ -61,9 +61,7 @@ async function fetchAggTradesDelta(base: string, path: string, symbol: string, s
     }
     return delta;
   } catch (err: any) {
-    const msg = String(err?.message || "");
-    // Fallback for environments where Binance returns 403 on time-bounded aggTrades
-    if (err?.status === 403 || msg.includes("HTTP 403")) {
+    if (err?.status === 403 || String(err?.message || "").includes("HTTP 403")) {
       const urlRecent = `${base}${path}?symbol=${symbol}&limit=1000`;
       const arr = await getJSON(urlRecent);
       let delta = 0;
@@ -90,8 +88,16 @@ async function fetchDepth(symbol: string, limit: number, bps: number) {
   const mid = (bestBid + bestAsk) / 2;
   const width = (bps / 10000) * mid;
   let bidDepth = 0, askDepth = 0;
-  for (const [p, q] of bids) { const price = toNumber(p), qty = toNumber(q); if (price >= mid - width) bidDepth += qty; else break; }
-  for (const [p, q] of asks) { const price = toNumber(p), qty = toNumber(q); if (price <= mid + width) askDepth += qty; else break; }
+  for (const [p, q] of bids) {
+    const price = toNumber(p);
+    const qty = toNumber(q);
+    if (price >= mid - width) bidDepth += qty; else break;
+  }
+  for (const [p, q] of asks) {
+    const price = toNumber(p);
+    const qty = toNumber(q);
+    if (price <= mid + width) askDepth += qty; else break;
+  }
   const spread = bestAsk - bestBid;
   return { bidDepth, askDepth, spread };
 }
@@ -117,7 +123,6 @@ function makeRecommendation(latest: any, prev: any | null) {
 }
 
 async function initSchema(env: Env) {
-  console.log(`[${BUILD_TAG}] initSchema: using batch()`);
   await env.DB.batch([
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS metrics (
       ts INTEGER NOT NULL,
@@ -166,8 +171,6 @@ async function getSeries(env: Env, symbol: string, limit = 120) {
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    console.log(`[${BUILD_TAG}] cron @ ${new Date(event.scheduledTime).toISOString()}`);
-    await initSchema(env);
     const symbols = (env.SYMBOLS || "BTCUSDT").split(",").map(s => s.trim()).filter(Boolean);
     const limit = Number(env.DEPTH_LIMIT || 200);
     const bps = Number(env.DEPTH_BPS || 10);
@@ -291,8 +294,8 @@ const DASHBOARD_HTML = `<!doctype html>
   </div>
 
   <script>
-    const $ =(s)=>document.querySelector(s);
-    const fmt =(x, d=4)=> (x==null?"":Number(x).toFixed(d));
+    const $ = (s)=>document.querySelector(s);
+    const fmt = (x, d=4)=> (x==null?"":Number(x).toFixed(d));
 
     async function loadSymbols(){
       const r = await fetch('/api/symbols');
@@ -308,38 +311,38 @@ const DASHBOARD_HTML = `<!doctype html>
     async function loadAll(){
       const symbol = $('#sym').value;
       const [rec, latest, series] = await Promise.all([
-        fetch(`/api/recommendation?symbol=${symbol}`).then(r=>r.json()),
-        fetch(`/api/latest?symbol=${symbol}`).then(r=>r.json()),
-        fetch(`/api/series?symbol=${symbol}&limit=60`).then(r=>r.json())
+        fetch(\`/api/recommendation?symbol=\${symbol}\`).then(r=>r.json()),
+        fetch(\`/api/latest?symbol=\${symbol}\`).then(r=>r.json()),
+        fetch(\`/api/series?symbol=\${symbol}&limit=60\`).then(r=>r.json())
       ]);
 
-      const badge = `<span class="badge ${rec.action}">${rec.action}</span>`;
-      $('#rec').innerHTML = `<div><strong>${symbol}</strong> @ ${fmt(rec.mark_price,2)} — ${badge} (conf ${fmt(rec.confidence,2)})<br><small>${(rec.reasons||[]).join(' • ')}</small></div>`;
+      const badge = \`<span class="badge \${rec.action}">\${rec.action}</span>\`;
+      $('#rec').innerHTML = \`<div><strong>\${symbol}</strong> @ \${fmt(rec.mark_price,2)} — \${badge} (conf \${fmt(rec.confidence,2)})<br><small>\${(rec.reasons||[]).join(' • ')}</small></div>\`;
 
       const L = latest||{};
-      $('#latest').innerHTML = `
+      $('#latest').innerHTML = \`
         <tr><th>pole</th><th>wartość</th></tr>
-        <tr><td>ts</td><td>${new Date(L.ts||0).toLocaleTimeString()}</td></tr>
-        <tr><td>mark_price</td><td>${fmt(L.mark_price,2)}</td></tr>
-        <tr><td>funding_rate</td><td>${fmt(L.funding_rate,5)}</td></tr>
-        <tr><td>oi</td><td>${fmt(L.oi,0)}</td></tr>
-        <tr><td>cvd_perp_delta</td><td>${fmt(L.cvd_perp_delta,2)}</td></tr>
-        <tr><td>cvd_spot_delta</td><td>${fmt(L.cvd_spot_delta,2)}</td></tr>
-        <tr><td>bid_depth_10bps</td><td>${fmt(L.bid_depth_10bps,2)}</td></tr>
-        <tr><td>ask_depth_10bps</td><td>${fmt(L.ask_depth_10bps,2)}</td></tr>
-        <tr><td>spread</td><td>${fmt(L.spread,2)}</td></tr>
-      `;
+        <tr><td>ts</td><td>\${new Date(L.ts||0).toLocaleTimeString()}</td></tr>
+        <tr><td>mark_price</td><td>\${fmt(L.mark_price,2)}</td></tr>
+        <tr><td>funding_rate</td><td>\${fmt(L.funding_rate,5)}</td></tr>
+        <tr><td>oi</td><td>\${fmt(L.oi,0)}</td></tr>
+        <tr><td>cvd_perp_delta</td><td>\${fmt(L.cvd_perp_delta,2)}</td></tr>
+        <tr><td>cvd_spot_delta</td><td>\${fmt(L.cvd_spot_delta,2)}</td></tr>
+        <tr><td>bid_depth_10bps</td><td>\${fmt(L.bid_depth_10bps,2)}</td></tr>
+        <tr><td>ask_depth_10bps</td><td>\${fmt(L.ask_depth_10bps,2)}</td></tr>
+        <tr><td>spread</td><td>\${fmt(L.spread,2)}</td></tr>
+      \`;
 
       const rows = (series.rows||[]).slice(-60);
       $('#series').innerHTML = '<tr><th>czas</th><th>mpx</th><th>fund</th><th>OI</th><th>CVDp</th><th>CVDs</th><th>bid10</th><th>ask10</th></tr>' +
-        rows.map(r=>`<tr><td>${new Date(r.ts).toLocaleTimeString()}</td><td>${fmt(r.mark_price,0)}</td><td>${fmt(r.funding_rate,5)}</td><td>${fmt(r.oi,0)}</td><td>${fmt(r.cvd_perp_delta,1)}</td><td>${fmt(r.cvd_spot_delta,1)}</td><td>${fmt(r.bid_depth_10bps,0)}</td><td>${fmt(r.ask_depth_10bps,0)}</td></tr>`).join('');
+        rows.map(r=>\`<tr><td>\${new Date(r.ts).toLocaleTimeString()}</td><td>\${fmt(r.mark_price,0)}</td><td>\${fmt(r.funding_rate,5)}</td><td>\${fmt(r.oi,0)}</td><td>\${fmt(r.cvd_perp_delta,1)}</td><td>\${fmt(r.cvd_spot_delta,1)}</td><td>\${fmt(r.bid_depth_10bps,0)}</td><td>\${fmt(r.ask_depth_10bps,0)}</td></tr>\`).join('');
     }
 
     document.addEventListener('DOMContentLoaded', async () => {
-      console.log("Dashboard loaded.");
+      await loadSymbols();
+      await loadAll();
+      document.getElementById('refresh')?.addEventListener('click', loadAll);
     });
-    $('#refresh')?.addEventListener('click', loadAll);
-    (async()=>{ await loadSymbols(); await loadAll(); })();
   </script>
 </body>
 </html>`;
