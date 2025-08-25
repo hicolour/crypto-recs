@@ -17,24 +17,6 @@ const nowMs = () => Date.now();
 const floorMin = (ms: number) => Math.floor(ms / 60000) * 60000;
 function toNumber(x: any, d = 0) { const n = Number(x); return Number.isFinite(n) ? n : d; }
 
-// SQL (tworzenie tabeli jeśli brak)
-const SQL_INIT = `
-CREATE TABLE IF NOT EXISTS metrics (
-  ts INTEGER NOT NULL,
-  symbol TEXT NOT NULL,
-  oi REAL,
-  funding_rate REAL,
-  mark_price REAL,
-  cvd_perp_delta REAL,
-  cvd_spot_delta REAL,
-  bid_depth_10bps REAL,
-  ask_depth_10bps REAL,
-  spread REAL,
-  PRIMARY KEY (ts, symbol)
-);
-CREATE INDEX IF NOT EXISTS idx_metrics_symbol_ts ON metrics(symbol, ts);
-`;
-
 // ---- Binance fetchers ----
 async function getJSON(url: string) {
   const r = await fetch(url, { headers: { "User-Agent": "cf-worker-crypto-recs/1.0" } });
@@ -60,7 +42,7 @@ async function fetchPremiumIndex(symbol: string) {
   };
 }
 
-// AggTrades (perp & spot) — liczenie 1‑min CVD z pola `m` (buyer is maker)
+// AggTrades (perp & spot) — liczenie 1-min CVD z pola `m` (buyer is maker)
 async function fetchAggTradesDelta(base: string, path: string, symbol: string, startTime: number, endTime: number) {
   const url = `${base}${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
   const arr = await getJSON(url);
@@ -147,7 +129,23 @@ function makeRecommendation(latest: any, prev: any | null) {
 
 // ---- Persist ----
 async function initSchema(env: Env) {
-  await env.DB.exec(SQL_INIT);
+  // Execute schema statements separately to avoid D1 multi-statement parsing issues
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS metrics (
+      ts INTEGER NOT NULL,
+      symbol TEXT NOT NULL,
+      oi REAL,
+      funding_rate REAL,
+      mark_price REAL,
+      cvd_perp_delta REAL,
+      cvd_spot_delta REAL,
+      bid_depth_10bps REAL,
+      ask_depth_10bps REAL,
+      spread REAL,
+      PRIMARY KEY (ts, symbol)
+    )`),
+    env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_metrics_symbol_ts ON metrics(symbol, ts)`)
+  ]);
 }
 
 async function insertMetrics(env: Env, row: any) {
