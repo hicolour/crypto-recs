@@ -79,15 +79,6 @@ async function fetchAggTradesDelta(base: string, path: string, symbol: string, s
     }
     throw err;
   }
-}${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
-  const arr = await getJSON(url);
-  let delta = 0;
-  for (const t of arr) {
-    const qty = toNumber((t.q ?? t.l ?? t.quantity) ?? 0);
-    const buyerIsMaker = !!t.m;
-    delta += buyerIsMaker ? -qty : +qty;
-  }
-  return delta;
 }
 
 async function fetchDepth(symbol: string, limit: number, bps: number) {
