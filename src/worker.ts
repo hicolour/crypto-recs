@@ -73,22 +73,14 @@ async function fetchPremiumIndex(symbol: string) {
     nextFundingTime: toNumber(j.nextFundingTime),
     time: toNumber(j.time),
   };
-}/fapi/v1/premiumIndex?symbol=${symbol}`);
-  return {
-    markPrice: toNumber(j.markPrice),
-    indexPrice: toNumber(j.indexPrice),
-    lastFundingRate: toNumber(j.lastFundingRate),
-    nextFundingTime: toNumber(j.nextFundingTime),
-    time: toNumber(j.time),
-  };
 }
 
 // AggTrades with 403-safe fallback (no start/end), then filter client-side
 async function fetchAggTradesDelta(base: string, path: string, symbol: string, startTime: number, endTime: number) {
   const isFutures = path.startsWith("/fapi/");
-  const primaryUrl = `${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
+  const windowPath = `${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
   try {
-    const arr = isFutures ? await fapiJSON(primaryUrl) : await spotJSON(primaryUrl);
+    const arr = isFutures ? await fapiJSON(windowPath) : await spotJSON(windowPath);
     let delta = 0;
     for (const t of arr) {
       const qty = Number((t.q ?? t.l ?? t.quantity) ?? 0);
@@ -97,36 +89,9 @@ async function fetchAggTradesDelta(base: string, path: string, symbol: string, s
     }
     return delta;
   } catch (err: any) {
+    const recentPath = `${path}?symbol=${symbol}&limit=1000`;
     if (err?.status === 403 || String(err?.message || "").includes("HTTP 403")) {
-      const recentUrl = `${path}?symbol=${symbol}&limit=1000`;
-      const arr = isFutures ? await fapiJSON(recentUrl) : await spotJSON(recentUrl);
-      let delta = 0;
-      for (const t of arr) {
-        const ts = Number(t.T ?? t.time ?? 0);
-        if (ts >= startTime && ts < endTime) {
-          const qty = Number((t.q ?? t.l ?? t.quantity) ?? 0);
-          const buyerIsMaker = !!t.m;
-          delta += buyerIsMaker ? -qty : +qty;
-        }
-      }
-      return delta;
-    }
-    throw err;
-  }
-}${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
-  try {
-    const arr = await getJSON(urlWindow);
-    let delta = 0;
-    for (const t of arr) {
-      const qty = Number((t.q ?? t.l ?? t.quantity) ?? 0);
-      const buyerIsMaker = !!t.m;
-      delta += buyerIsMaker ? -qty : +qty;
-    }
-    return delta;
-  } catch (err: any) {
-    if (err?.status === 403 || String(err?.message || "").includes("HTTP 403")) {
-      const urlRecent = `${base}${path}?symbol=${symbol}&limit=1000`;
-      const arr = await getJSON(urlRecent);
+      const arr = isFutures ? await fapiJSON(recentPath) : await spotJSON(recentPath);
       let delta = 0;
       for (const t of arr) {
         const ts = Number(t.T ?? t.time ?? 0);
@@ -141,7 +106,6 @@ async function fetchAggTradesDelta(base: string, path: string, symbol: string, s
     throw err;
   }
 }
-
 async function fetchDepth(symbol: string, limit: number, bps: number) {
   const j = await fapiJSON(`/fapi/v1/depth?symbol=${symbol}&limit=${limit}`);
   const bids: [string, string][] = j.bids || [];
@@ -163,7 +127,6 @@ async function fetchDepth(symbol: string, limit: number, bps: number) {
   }
   const spread = bestAsk - bestBid;
   return { bidDepth, askDepth, spread };
-}/fapi/v1/depth?symbol=${symbol}&limit=${limit}`);
   const bids: [string, string][] = j.bids || [];
   const asks: [string, string][] = j.asks || [];
   const bestBid = bids.length ? toNumber(bids[0][0]) : NaN;
