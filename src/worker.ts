@@ -30,9 +30,6 @@ async function getJSON(url: string) {
     throw err;
   }
   return r.json();
-} });
-  if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
-  return r.json();
 }
 
 async function fetchOI(symbol: string) {
