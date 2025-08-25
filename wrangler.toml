@@ -1,0 +1,19 @@
+name = "crypto-recs"
+main = "src/worker.ts"
+compatibility_date = "2025-08-01"
+
+
+[triggers]
+crons = ["*/1 * * * *"] # co minutę
+
+
+[vars]
+SYMBOLS = "BTCUSDT,ETHUSDT,SOLUSDT"
+DEPTH_LIMIT = "200" # 100/200/500 (im więcej tym większy weight)
+DEPTH_BPS = "10" # 10 bps = 0.1% od mid
+
+
+[[d1_databases]]
+binding = "DB"
+database_name = "crypto_recs"
+database_id = "WSTAW_SWOJE_DATABASE_ID"
