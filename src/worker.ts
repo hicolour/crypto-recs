@@ -1,5 +1,6 @@
 // Cloudflare Worker — agregator Binance + proste rekomendacje
-// Version: 1.2 (batch schema, 403 fallback for aggTrades, fixed HTML escaping)
+// Version: 1.3 (clean rebuild: host fallbacks, batch schema, 403-safe aggTrades, fixed HTML escaping)
+
 export interface Env {
   DB: D1Database;
   SYMBOLS: string;
@@ -7,29 +8,13 @@ export interface Env {
   DEPTH_BPS?: string;
 }
 
-const FAPI = "https://fapi.binance.com";
-const SPOT = "https://api.binance.com";
+const BUILD_TAG = "crypto-recs/1.3";
+const FAPI_DEFAULT = "https://fapi.binance.com";
+const SPOT_DEFAULT = "https://api.binance.com";
 
+const FAPI_HOSTS = [FAPI_DEFAULT, "https://data-api.binance.vision"];
+const SPOT_HOSTS = [SPOT_DEFAULT, "https://data-api.binance.vision"];
 
-const FAPI_HOSTS = ["https://fapi.binance.com", "https://data-api.binance.vision"];
-const SPOT_HOSTS = ["https://api.binance.com", "https://data-api.binance.vision"];
-
-async function fapiJSON(pathWithQuery: string) {
-  let lastErr: any = null;
-  for (const host of FAPI_HOSTS) {
-    try { return await getJSON(`${host}${pathWithQuery}`); } catch (e: any) { lastErr = e; if (e?.status !== 403) break; }
-  }
-  throw lastErr || new Error("FAPI request failed");
-}
-
-async function spotJSON(pathWithQuery: string) {
-  let lastErr: any = null;
-  for (const host of SPOT_HOSTS) {
-    try { return await getJSON(`${host}${pathWithQuery}`); } catch (e: any) { lastErr = e; if (e?.status !== 403) break; }
-  }
-  throw lastErr || new Error("SPOT request failed");
-}
-const BUILD_TAG = "crypto-recs/1.2";
 const nowMs = () => Date.now();
 const floorMin = (ms: number) => Math.floor(ms / 60000) * 60000;
 function toNumber(x: any, d = 0) { const n = Number(x); return Number.isFinite(n) ? n : d; }
@@ -51,18 +36,36 @@ async function getJSON(url: string) {
   return r.json();
 }
 
+async function fapiJSON(pathWithQuery: string) {
+  let lastErr: any = null;
+  for (const host of FAPI_HOSTS) {
+    try { return await getJSON(`${host}${pathWithQuery}`); } catch (e: any) { lastErr = e; if (e?.status != 403) break; }
+  }
+  throw lastErr || new Error("FAPI request failed");
+}
+
+async function spotJSON(pathWithQuery: string) {
+  let lastErr: any = null;
+  for (const host of SPOT_HOSTS) {
+    try { return await getJSON(`${host}${pathWithQuery}`); } catch (e: any) { lastErr = e; if (e?.status != 403) break; }
+  }
+  throw lastErr || new Error("SPOT request failed");
+}
+
+// ---- Data fetchers ----
 async function fetchOI(symbol: string) {
   try {
     const j = await fapiJSON(`/fapi/v1/openInterest?symbol=${symbol}`);
     return { oi: toNumber(j.openInterest), time: toNumber(j.time) };
   } catch (err: any) {
-    // Fallback to historical open interest if direct endpoint is blocked
+    // Fallback: historical OI snapshot
     const arr = await fapiJSON(`/futures/data/openInterestHist?symbol=${symbol}&period=5m&limit=1`);
     const last = Array.isArray(arr) && arr.length ? arr[arr.length - 1] : null;
     const oi = last ? toNumber(last.sumOpenInterest ?? last.openInterest ?? 0) : NaN;
     const time = last ? toNumber(last.timestamp ?? last.time ?? 0) : Date.now();
     return { oi, time };
   }
+}
 
 async function fetchPremiumIndex(symbol: string) {
   const j = await fapiJSON(`/fapi/v1/premiumIndex?symbol=${symbol}`);
@@ -75,7 +78,7 @@ async function fetchPremiumIndex(symbol: string) {
   };
 }
 
-// AggTrades with 403-safe fallback (no start/end), then filter client-side
+// AggTrades delta with 403-safe fallback
 async function fetchAggTradesDelta(base: string, path: string, symbol: string, startTime: number, endTime: number) {
   const isFutures = path.startsWith("/fapi/");
   const windowPath = `${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
@@ -106,48 +109,29 @@ async function fetchAggTradesDelta(base: string, path: string, symbol: string, s
     throw err;
   }
 }
+
 async function fetchDepth(symbol: string, limit: number, bps: number) {
   const j = await fapiJSON(`/fapi/v1/depth?symbol=${symbol}&limit=${limit}`);
-  const bids: [string, string][] = j.bids || [];
-  const asks: [string, string][] = j.asks || [];
-  const bestBid = bids.length ? toNumber(bids[0][0]) : NaN;
-  const bestAsk = asks.length ? toNumber(asks[0][0]) : NaN;
+  const bidsArr: [string, string][] = j.bids || [];
+  const asksArr: [string, string][] = j.asks || [];
+  const bestBid = bidsArr.length ? toNumber(bidsArr[0][0]) : NaN;
+  const bestAsk = asksArr.length ? toNumber(asksArr[0][0]) : NaN;
   const mid = (bestBid + bestAsk) / 2;
   const width = (bps / 10000) * mid;
   let bidDepth = 0, askDepth = 0;
-  for (const [p, q] of bids) {
-    const price = toNumber(p);
-    const qty = toNumber(q);
+  for (const [p, q] of bidsArr) {
+    const price = toNumber(p); const qty = toNumber(q);
     if (price >= mid - width) bidDepth += qty; else break;
   }
-  for (const [p, q] of asks) {
-    const price = toNumber(p);
-    const qty = toNumber(q);
-    if (price <= mid + width) askDepth += qty; else break;
-  }
-  const spread = bestAsk - bestBid;
-  return { bidDepth, askDepth, spread };
-  const bids: [string, string][] = j.bids || [];
-  const asks: [string, string][] = j.asks || [];
-  const bestBid = bids.length ? toNumber(bids[0][0]) : NaN;
-  const bestAsk = asks.length ? toNumber(asks[0][0]) : NaN;
-  const mid = (bestBid + bestAsk) / 2;
-  const width = (bps / 10000) * mid;
-  let bidDepth = 0, askDepth = 0;
-  for (const [p, q] of bids) {
-    const price = toNumber(p);
-    const qty = toNumber(q);
-    if (price >= mid - width) bidDepth += qty; else break;
-  }
-  for (const [p, q] of asks) {
-    const price = toNumber(p);
-    const qty = toNumber(q);
+  for (const [p, q] of asksArr) {
+    const price = toNumber(p); const qty = toNumber(q);
     if (price <= mid + width) askDepth += qty; else break;
   }
   const spread = bestAsk - bestBid;
   return { bidDepth, askDepth, spread };
 }
 
+// ---- Recommendation heuristics ----
 function makeRecommendation(latest: any, prev: any | null) {
   if (!latest) return { action: "NO_DATA", confidence: 0, reasons: ["brak danych"] };
   const reasons: string[] = [];
@@ -168,6 +152,7 @@ function makeRecommendation(latest: any, prev: any | null) {
   return { action, confidence: Number(confidence.toFixed(2)), reasons };
 }
 
+// ---- D1 persistence ----
 async function initSchema(env: Env) {
   await env.DB.batch([
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS metrics (
@@ -215,6 +200,7 @@ async function getSeries(env: Env, symbol: string, limit = 120) {
   return results || [];
 }
 
+// ---- Worker ----
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const symbols = (env.SYMBOLS || "BTCUSDT").split(",").map(s => s.trim()).filter(Boolean);
@@ -229,8 +215,8 @@ export default {
         const [oi, px, perpDelta, spotDelta, depth] = await Promise.all([
           fetchOI(symbol),
           fetchPremiumIndex(symbol),
-          fetchAggTradesDelta(FAPI, "/fapi/v1/aggTrades", symbol, start, end),
-          fetchAggTradesDelta(SPOT, "/api/v3/aggTrades", symbol, start, end),
+          fetchAggTradesDelta(FAPI_DEFAULT, "/fapi/v1/aggTrades", symbol, start, end),
+          fetchAggTradesDelta(SPOT_DEFAULT, "/api/v3/aggTrades", symbol, start, end),
           fetchDepth(symbol, limit, bps),
         ]);
 
