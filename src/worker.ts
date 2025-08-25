@@ -63,9 +63,6 @@ async function fetchOI(symbol: string) {
     const time = last ? toNumber(last.timestamp ?? last.time ?? 0) : Date.now();
     return { oi, time };
   }
-}/fapi/v1/openInterest?symbol=${symbol}`);
-  return { oi: toNumber(j.openInterest), time: toNumber(j.time) };
-}
 
 async function fetchPremiumIndex(symbol: string) {
   const j = await fapiJSON(`/fapi/v1/premiumIndex?symbol=${symbol}`);
