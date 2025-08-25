@@ -10,6 +10,25 @@ export interface Env {
 const FAPI = "https://fapi.binance.com";
 const SPOT = "https://api.binance.com";
 
+
+const FAPI_HOSTS = ["https://fapi.binance.com", "https://data-api.binance.vision"];
+const SPOT_HOSTS = ["https://api.binance.com", "https://data-api.binance.vision"];
+
+async function fapiJSON(pathWithQuery: string) {
+  let lastErr: any = null;
+  for (const host of FAPI_HOSTS) {
+    try { return await getJSON(`${host}${pathWithQuery}`); } catch (e: any) { lastErr = e; if (e?.status !== 403) break; }
+  }
+  throw lastErr || new Error("FAPI request failed");
+}
+
+async function spotJSON(pathWithQuery: string) {
+  let lastErr: any = null;
+  for (const host of SPOT_HOSTS) {
+    try { return await getJSON(`${host}${pathWithQuery}`); } catch (e: any) { lastErr = e; if (e?.status !== 403) break; }
+  }
+  throw lastErr || new Error("SPOT request failed");
+}
 const BUILD_TAG = "crypto-recs/1.2";
 const nowMs = () => Date.now();
 const floorMin = (ms: number) => Math.floor(ms / 60000) * 60000;
@@ -33,12 +52,31 @@ async function getJSON(url: string) {
 }
 
 async function fetchOI(symbol: string) {
-  const j = await getJSON(`${FAPI}/fapi/v1/openInterest?symbol=${symbol}`);
+  try {
+    const j = await fapiJSON(`/fapi/v1/openInterest?symbol=${symbol}`);
+    return { oi: toNumber(j.openInterest), time: toNumber(j.time) };
+  } catch (err: any) {
+    // Fallback to historical open interest if direct endpoint is blocked
+    const arr = await fapiJSON(`/futures/data/openInterestHist?symbol=${symbol}&period=5m&limit=1`);
+    const last = Array.isArray(arr) && arr.length ? arr[arr.length - 1] : null;
+    const oi = last ? toNumber(last.sumOpenInterest ?? last.openInterest ?? 0) : NaN;
+    const time = last ? toNumber(last.timestamp ?? last.time ?? 0) : Date.now();
+    return { oi, time };
+  }
+}/fapi/v1/openInterest?symbol=${symbol}`);
   return { oi: toNumber(j.openInterest), time: toNumber(j.time) };
 }
 
 async function fetchPremiumIndex(symbol: string) {
-  const j = await getJSON(`${FAPI}/fapi/v1/premiumIndex?symbol=${symbol}`);
+  const j = await fapiJSON(`/fapi/v1/premiumIndex?symbol=${symbol}`);
+  return {
+    markPrice: toNumber(j.markPrice),
+    indexPrice: toNumber(j.indexPrice),
+    lastFundingRate: toNumber(j.lastFundingRate),
+    nextFundingTime: toNumber(j.nextFundingTime),
+    time: toNumber(j.time),
+  };
+}/fapi/v1/premiumIndex?symbol=${symbol}`);
   return {
     markPrice: toNumber(j.markPrice),
     indexPrice: toNumber(j.indexPrice),
@@ -50,7 +88,35 @@ async function fetchPremiumIndex(symbol: string) {
 
 // AggTrades with 403-safe fallback (no start/end), then filter client-side
 async function fetchAggTradesDelta(base: string, path: string, symbol: string, startTime: number, endTime: number) {
-  const urlWindow = `${base}${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
+  const isFutures = path.startsWith("/fapi/");
+  const primaryUrl = `${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
+  try {
+    const arr = isFutures ? await fapiJSON(primaryUrl) : await spotJSON(primaryUrl);
+    let delta = 0;
+    for (const t of arr) {
+      const qty = Number((t.q ?? t.l ?? t.quantity) ?? 0);
+      const buyerIsMaker = !!t.m;
+      delta += buyerIsMaker ? -qty : +qty;
+    }
+    return delta;
+  } catch (err: any) {
+    if (err?.status === 403 || String(err?.message || "").includes("HTTP 403")) {
+      const recentUrl = `${path}?symbol=${symbol}&limit=1000`;
+      const arr = isFutures ? await fapiJSON(recentUrl) : await spotJSON(recentUrl);
+      let delta = 0;
+      for (const t of arr) {
+        const ts = Number(t.T ?? t.time ?? 0);
+        if (ts >= startTime && ts < endTime) {
+          const qty = Number((t.q ?? t.l ?? t.quantity) ?? 0);
+          const buyerIsMaker = !!t.m;
+          delta += buyerIsMaker ? -qty : +qty;
+        }
+      }
+      return delta;
+    }
+    throw err;
+  }
+}${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
   try {
     const arr = await getJSON(urlWindow);
     let delta = 0;
@@ -80,7 +146,27 @@ async function fetchAggTradesDelta(base: string, path: string, symbol: string, s
 }
 
 async function fetchDepth(symbol: string, limit: number, bps: number) {
-  const j = await getJSON(`${FAPI}/fapi/v1/depth?symbol=${symbol}&limit=${limit}`);
+  const j = await fapiJSON(`/fapi/v1/depth?symbol=${symbol}&limit=${limit}`);
+  const bids: [string, string][] = j.bids || [];
+  const asks: [string, string][] = j.asks || [];
+  const bestBid = bids.length ? toNumber(bids[0][0]) : NaN;
+  const bestAsk = asks.length ? toNumber(asks[0][0]) : NaN;
+  const mid = (bestBid + bestAsk) / 2;
+  const width = (bps / 10000) * mid;
+  let bidDepth = 0, askDepth = 0;
+  for (const [p, q] of bids) {
+    const price = toNumber(p);
+    const qty = toNumber(q);
+    if (price >= mid - width) bidDepth += qty; else break;
+  }
+  for (const [p, q] of asks) {
+    const price = toNumber(p);
+    const qty = toNumber(q);
+    if (price <= mid + width) askDepth += qty; else break;
+  }
+  const spread = bestAsk - bestBid;
+  return { bidDepth, askDepth, spread };
+}/fapi/v1/depth?symbol=${symbol}&limit=${limit}`);
   const bids: [string, string][] = j.bids || [];
   const asks: [string, string][] = j.asks || [];
   const bestBid = bids.length ? toNumber(bids[0][0]) : NaN;
