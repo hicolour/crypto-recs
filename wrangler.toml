@@ -17,3 +17,7 @@ DEPTH_BPS = "10" # 10 bps = 0.1% od mid
 binding = "DB"
 database_name = "crypto_recs"
 database_id = "5b3dfcfb-de53-4288-b92f-a4de250fa24d"
+
+
+[observability.logs]
+enabled = true
