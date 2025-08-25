@@ -1,36 +1,31 @@
 // Cloudflare Worker — agregator Binance + proste rekomendacje
-// Minimalny, bez zewn. bibliotek. TS/ESM. D1 jako timeseria.
-// Autor: (tu możesz wpisać siebie)
-
+// Version: 1.1 (initSchema via batch + logging)
 export interface Env {
   DB: D1Database;
-  SYMBOLS: string;           // Np. "BTCUSDT,ETHUSDT,SOLUSDT"
-  DEPTH_LIMIT?: string;      // 100/200/500/1000 (uwaga na weight)
-  DEPTH_BPS?: string;        // bps do liczenia depthu od mid (domyślnie 10)
+  SYMBOLS: string;
+  DEPTH_LIMIT?: string;
+  DEPTH_BPS?: string;
 }
 
-const FAPI = "https://fapi.binance.com"; // USDⓈ-M Futures
-const SPOT = "https://api.binance.com";  // Spot
+const FAPI = "https://fapi.binance.com";
+const SPOT = "https://api.binance.com";
 
-// Utils
+const BUILD_TAG = "crypto-recs/1.1";
 const nowMs = () => Date.now();
 const floorMin = (ms: number) => Math.floor(ms / 60000) * 60000;
 function toNumber(x: any, d = 0) { const n = Number(x); return Number.isFinite(n) ? n : d; }
 
-// ---- Binance fetchers ----
 async function getJSON(url: string) {
-  const r = await fetch(url, { headers: { "User-Agent": "cf-worker-crypto-recs/1.0" } });
+  const r = await fetch(url, { headers: { "User-Agent": BUILD_TAG } });
   if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
   return r.json();
 }
 
-// Open Interest (bieżące)
 async function fetchOI(symbol: string) {
   const j = await getJSON(`${FAPI}/fapi/v1/openInterest?symbol=${symbol}`);
   return { oi: toNumber(j.openInterest), time: toNumber(j.time) };
 }
 
-// PremiumIndex — mark price + funding live
 async function fetchPremiumIndex(symbol: string) {
   const j = await getJSON(`${FAPI}/fapi/v1/premiumIndex?symbol=${symbol}`);
   return {
@@ -42,20 +37,18 @@ async function fetchPremiumIndex(symbol: string) {
   };
 }
 
-// AggTrades (perp & spot) — liczenie 1-min CVD z pola `m` (buyer is maker)
 async function fetchAggTradesDelta(base: string, path: string, symbol: string, startTime: number, endTime: number) {
   const url = `${base}${path}?symbol=${symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
   const arr = await getJSON(url);
   let delta = 0;
   for (const t of arr) {
-    const qty = toNumber(t.q || t.l || t.quantity || 0); // futures: q, czasem l
-    const buyerIsMaker = !!t.m; // true => agresor = sprzedający => delta -
+    const qty = toNumber((t.q ?? t.l ?? t.quantity) ?? 0);
+    const buyerIsMaker = !!t.m;
     delta += buyerIsMaker ? -qty : +qty;
   }
   return delta;
 }
 
-// Orderbook snapshot (futures). Zwraca depth w X bps i spread.
 async function fetchDepth(symbol: string, limit: number, bps: number) {
   const j = await getJSON(`${FAPI}/fapi/v1/depth?symbol=${symbol}&limit=${limit}`);
   const bids: [string, string][] = j.bids || [];
@@ -63,22 +56,14 @@ async function fetchDepth(symbol: string, limit: number, bps: number) {
   const bestBid = bids.length ? toNumber(bids[0][0]) : NaN;
   const bestAsk = asks.length ? toNumber(asks[0][0]) : NaN;
   const mid = (bestBid + bestAsk) / 2;
-  const width = (bps / 10000) * mid; // 10 bps = 0.001 * mid
+  const width = (bps / 10000) * mid;
   let bidDepth = 0, askDepth = 0;
-  for (const [p, q] of bids) {
-    const price = toNumber(p); const qty = toNumber(q);
-    if (price >= mid - width) bidDepth += qty; else break;
-  }
-  for (const [p, q] of asks) {
-    const price = toNumber(p); const qty = toNumber(q);
-    if (price <= mid + width) askDepth += qty; else break;
-  }
+  for (const [p, q] of bids) { const price = toNumber(p), qty = toNumber(q); if (price >= mid - width) bidDepth += qty; else break; }
+  for (const [p, q] of asks) { const price = toNumber(p), qty = toNumber(q); if (price <= mid + width) askDepth += qty; else break; }
   const spread = bestAsk - bestBid;
   return { bidDepth, askDepth, spread };
 }
 
-// ---- Heurystyki rekomendacji ----
-// Pobiera ostatni i poprzedni rekord, buduje prostą sugestię.
 function makeRecommendation(latest: any, prev: any | null) {
   if (!latest) return { action: "NO_DATA", confidence: 0, reasons: ["brak danych"] };
   const reasons: string[] = [];
@@ -90,46 +75,17 @@ function makeRecommendation(latest: any, prev: any | null) {
   const dOI = prev ? toNumber(latest.oi) - toNumber(prev.oi) : 0;
 
   let action = "WAIT"; let confidence = 0.5;
-
-  // Divergence filtr: gdy CVD spot i perp mają przeciwne znaki — ryzyko chop
-  if (cvdPerp * cvdSpot < 0) {
-    reasons.push("dywergencja CVD spot vs perp → ryzyko chop");
-    action = "NO_TRADE"; confidence = 0.6;
-  }
-
-  // Long bias — napływ agresywnych kupujących, przewaga bidów w depth
-  if (cvdPerp > 0 && cvdSpot > 0 && depthRatio > 1.3) {
-    reasons.push(`napływ kupna (CVD>0) + bid/ask ${depthRatio.toFixed(2)}>1.3`);
-    action = "LONG_BIAS"; confidence = Math.min(0.9, 0.6 + Math.log10(depthRatio));
-  }
-
-  // Short bias — przewaga agresywnej sprzedaży + podaż w księdze
-  if (cvdPerp < 0 && cvdSpot < 0 && depthRatio < 0.77) {
-    reasons.push(`napływ sprzedaży (CVD<0) + bid/ask ${depthRatio.toFixed(2)}<0.77`);
-    action = "SHORT_BIAS"; confidence = Math.min(0.9, 0.6 + Math.log10(1/(depthRatio||1)));
-  }
-
-  // Squeeze sygnały (ostrożność):
-  if (fr < -0.0005 && cvdPerp > 0 && dOI > 0) {
-    reasons.push("ryzyko short squeeze: funding < 0, CVD>0, OI rośnie");
-    if (action === "SHORT_BIAS") { action = "NO_TRADE"; }
-  }
-  if (fr > 0.0005 && cvdPerp < 0 && dOI > 0) {
-    reasons.push("ryzyko long liquidation: funding > 0, CVD<0, OI rośnie");
-    if (action === "LONG_BIAS") { action = "NO_TRADE"; }
-  }
-
-  // Spread sanity
-  if (spread > 0 && spread / latest.mark_price > 0.0008) {
-    reasons.push("szeroki spread → gorsze wejścia");
-  }
-
+  if (cvdPerp * cvdSpot < 0) { reasons.push("dywergencja CVD spot vs perp → ryzyko chop"); action = "NO_TRADE"; confidence = 0.6; }
+  if (cvdPerp > 0 && cvdSpot > 0 && depthRatio > 1.3) { reasons.push(`napływ kupna (CVD>0) + bid/ask ${depthRatio.toFixed(2)}>1.3`); action = "LONG_BIAS"; confidence = Math.min(0.9, 0.6 + Math.log10(depthRatio)); }
+  if (cvdPerp < 0 && cvdSpot < 0 && depthRatio < 0.77) { reasons.push(`napływ sprzedaży (CVD<0) + bid/ask ${depthRatio.toFixed(2)}<0.77`); action = "SHORT_BIAS"; confidence = Math.min(0.9, 0.6 + Math.log10(1/(depthRatio||1))); }
+  if (fr < -0.0005 && cvdPerp > 0 && dOI > 0) { reasons.push("ryzyko short squeeze: funding < 0, CVD>0, OI rośnie"); if (action === "SHORT_BIAS") action = "NO_TRADE"; }
+  if (fr > 0.0005 && cvdPerp < 0 && dOI > 0) { reasons.push("ryzyko long liquidation: funding > 0, CVD<0, OI rośnie"); if (action === "LONG_BIAS") action = "NO_TRADE"; }
+  if (spread > 0 && spread / latest.mark_price > 0.0008) { reasons.push("szeroki spread → gorsze wejścia"); }
   return { action, confidence: Number(confidence.toFixed(2)), reasons };
 }
 
-// ---- Persist ----
 async function initSchema(env: Env) {
-  // Execute schema statements separately to avoid D1 multi-statement parsing issues
+  console.log(`[${BUILD_TAG}] initSchema: using batch()`);
   await env.DB.batch([
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS metrics (
       ts INTEGER NOT NULL,
@@ -176,20 +132,19 @@ async function getSeries(env: Env, symbol: string, limit = 120) {
   return results || [];
 }
 
-// ---- Scheduler ----
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    console.log(`[${BUILD_TAG}] cron @ ${new Date(event.scheduledTime).toISOString()}`);
     await initSchema(env);
     const symbols = (env.SYMBOLS || "BTCUSDT").split(",").map(s => s.trim()).filter(Boolean);
     const limit = Number(env.DEPTH_LIMIT || 200);
     const bps = Number(env.DEPTH_BPS || 10);
 
     const end = floorMin(nowMs());
-    const start = end - 60000; // ostatnia minuta
+    const start = end - 60000;
 
     for (const symbol of symbols) {
       try {
-        // Równoległe pobrania
         const [oi, px, perpDelta, spotDelta, depth] = await Promise.all([
           fetchOI(symbol),
           fetchPremiumIndex(symbol),
@@ -213,12 +168,11 @@ export default {
 
         await insertMetrics(env, row);
       } catch (err: any) {
-        console.error("collect error", symbol, err?.message || err);
+        console.error(`[${BUILD_TAG}] collect error for ${symbol}:`, err?.message || err);
       }
     }
   },
 
-  // ---- API & dashboard ----
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
@@ -250,7 +204,6 @@ export default {
       return json({ symbols });
     }
 
-    // Prosty dashboard HTML
     if (path === "/") {
       return html(DASHBOARD_HTML);
     }
@@ -323,37 +276,37 @@ const DASHBOARD_HTML = `<!doctype html>
     async function loadAll(){
       const symbol = $('#sym').value;
       const [rec, latest, series] = await Promise.all([
-        fetch(\`/api/recommendation?symbol=\${symbol}\`).then(r=>r.json()),
-        fetch(\`/api/latest?symbol=\${symbol}\`).then(r=>r.json()),
-        fetch(\`/api/series?symbol=\${symbol}&limit=60\`).then(r=>r.json())
+        fetch(`/api/recommendation?symbol=${symbol}`).then(r=>r.json()),
+        fetch(`/api/latest?symbol=${symbol}`).then(r=>r.json()),
+        fetch(`/api/series?symbol=${symbol}&limit=60`).then(r=>r.json())
       ]);
 
-      // Rec
-      const badge = \`<span class="badge \${rec.action}">\${rec.action}</span>\`;
-      $('#rec').innerHTML = \`<div><strong>\${symbol}</strong> @ \${fmt(rec.mark_price,2)} — \${badge} (conf \${fmt(rec.confidence,2)})<br><small>\${(rec.reasons||[]).join(' • ')}</small></div>\`;
+      const badge = `<span class="badge ${rec.action}">${rec.action}</span>`;
+      $('#rec').innerHTML = `<div><strong>${symbol}</strong> @ ${fmt(rec.mark_price,2)} — ${badge} (conf ${fmt(rec.confidence,2)})<br><small>${(rec.reasons||[]).join(' • ')}</small></div>`;
 
-      // Latest
       const L = latest||{};
-      $('#latest').innerHTML = \`
+      $('#latest').innerHTML = `
         <tr><th>pole</th><th>wartość</th></tr>
-        <tr><td>ts</td><td>\${new Date(L.ts||0).toLocaleTimeString()}</td></tr>
-        <tr><td>mark_price</td><td>\${fmt(L.mark_price,2)}</td></tr>
-        <tr><td>funding_rate</td><td>\${fmt(L.funding_rate,5)}</td></tr>
-        <tr><td>oi</td><td>\${fmt(L.oi,0)}</td></tr>
-        <tr><td>cvd_perp_delta</td><td>\${fmt(L.cvd_perp_delta,2)}</td></tr>
-        <tr><td>cvd_spot_delta</td><td>\${fmt(L.cvd_spot_delta,2)}</td></tr>
-        <tr><td>bid_depth_10bps</td><td>\${fmt(L.bid_depth_10bps,2)}</td></tr>
-        <tr><td>ask_depth_10bps</td><td>\${fmt(L.ask_depth_10bps,2)}</td></tr>
-        <tr><td>spread</td><td>\${fmt(L.spread,2)}</td></tr>
-      \`;
+        <tr><td>ts</td><td>${new Date(L.ts||0).toLocaleTimeString()}</td></tr>
+        <tr><td>mark_price</td><td>${fmt(L.mark_price,2)}</td></tr>
+        <tr><td>funding_rate</td><td>${fmt(L.funding_rate,5)}</td></tr>
+        <tr><td>oi</td><td>${fmt(L.oi,0)}</td></tr>
+        <tr><td>cvd_perp_delta</td><td>${fmt(L.cvd_perp_delta,2)}</td></tr>
+        <tr><td>cvd_spot_delta</td><td>${fmt(L.cvd_spot_delta,2)}</td></tr>
+        <tr><td>bid_depth_10bps</td><td>${fmt(L.bid_depth_10bps,2)}</td></tr>
+        <tr><td>ask_depth_10bps</td><td>${fmt(L.ask_depth_10bps,2)}</td></tr>
+        <tr><td>spread</td><td>${fmt(L.spread,2)}</td></tr>
+      `;
 
-      // Series
       const rows = (series.rows||[]).slice(-60);
       $('#series').innerHTML = '<tr><th>czas</th><th>mpx</th><th>fund</th><th>OI</th><th>CVDp</th><th>CVDs</th><th>bid10</th><th>ask10</th></tr>' +
-        rows.map(r=>\`<tr><td>\${new Date(r.ts).toLocaleTimeString()}</td><td>\${fmt(r.mark_price,0)}</td><td>\${fmt(r.funding_rate,5)}</td><td>\${fmt(r.oi,0)}</td><td>\${fmt(r.cvd_perp_delta,1)}</td><td>\${fmt(r.cvd_spot_delta,1)}</td><td>\${fmt(r.bid_depth_10bps,0)}</td><td>\${fmt(r.ask_depth_10bps,0)}</td></tr>\`).join('');
+        rows.map(r=>`<tr><td>${new Date(r.ts).toLocaleTimeString()}</td><td>${fmt(r.mark_price,0)}</td><td>${fmt(r.funding_rate,5)}</td><td>${fmt(r.oi,0)}</td><td>${fmt(r.cvd_perp_delta,1)}</td><td>${fmt(r.cvd_spot_delta,1)}</td><td>${fmt(r.bid_depth_10bps,0)}</td><td>${fmt(r.ask_depth_10bps,0)}</td></tr>`).join('');
     }
 
-    $('#refresh').addEventListener('click', loadAll);
+    document.addEventListener('DOMContentLoaded', async () => {
+      console.log("Dashboard loaded.");
+    });
+    $('#refresh')?.addEventListener('click', loadAll);
     (async()=>{ await loadSymbols(); await loadAll(); })();
   </script>
 </body>
