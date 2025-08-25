@@ -16,4 +16,4 @@ DEPTH_BPS = "10" # 10 bps = 0.1% od mid
 [[d1_databases]]
 binding = "DB"
 database_name = "crypto_recs"
-database_id = "WSTAW_SWOJE_DATABASE_ID"
+database_id = "5b3dfcfb-de53-4288-b92f-a4de250fa24d"
