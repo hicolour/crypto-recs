@@ -39,7 +39,17 @@ async function getJSON(url: string) {
 async function fapiJSON(pathWithQuery: string) {
   let lastErr: any = null;
   for (const host of FAPI_HOSTS) {
-    try { return await getJSON(`${host}${pathWithQuery}`); } catch (e: any) { lastErr = e; if (e?.status != 403) break; }
+    try {
+      return await getJSON(`${host}${pathWithQuery}`);
+    } catch (e: any) {
+      lastErr = e;
+      const st = e?.status;
+      if (st === 403 || st === 451 || st === 429 || st === 418) {
+        // try next host
+        continue;
+      }
+      break;
+    }
   }
   throw lastErr || new Error("FAPI request failed");
 }
@@ -47,7 +57,17 @@ async function fapiJSON(pathWithQuery: string) {
 async function spotJSON(pathWithQuery: string) {
   let lastErr: any = null;
   for (const host of SPOT_HOSTS) {
-    try { return await getJSON(`${host}${pathWithQuery}`); } catch (e: any) { lastErr = e; if (e?.status != 403) break; }
+    try {
+      return await getJSON(`${host}${pathWithQuery}`);
+    } catch (e: any) {
+      lastErr = e;
+      const st = e?.status;
+      if (st === 403 || st === 451 || st === 429 || st === 418) {
+        // try next host
+        continue;
+      }
+      break;
+    }
   }
   throw lastErr || new Error("SPOT request failed");
 }
