@@ -9,9 +9,9 @@ crons = ["*/1 * * * *"] # co minutę
 
 [vars]
 SYMBOLS = "BTCUSDT,ETHUSDT,SOLUSDT"
-DEPTH_LIMIT = "200" # 100/200/500 (im więcej tym większy weight)
-DEPTH_BPS = "10" # 10 bps = 0.1% od mid
-
+DEPTH_LIMIT = "100"
+LIQ_BIN_SIZE = "50"
+USE_MIRROR_ONLY = "1"
 
 [[d1_databases]]
 binding = "DB"
@@ -21,3 +21,9 @@ database_id = "5b3dfcfb-de53-4288-b92f-a4de250fa24d"
 
 [observability.logs]
 enabled = true
+
+[dev]
+ip = "0.0.0.0"
+port = 8787
+local_protocol = "http"
+

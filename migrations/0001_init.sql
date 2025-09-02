@@ -1,6 +1,5 @@
--- 0001_init.sql
--- Create metrics table and index for the CF Worker project
-
+-- migrations/0001_init.sql
+-- D1 schema for crypto-recs Worker (metrics + DIY liquidation levels); unchanged for v2.5
 CREATE TABLE IF NOT EXISTS metrics (
   ts INTEGER NOT NULL,
   symbol TEXT NOT NULL,
@@ -14,5 +13,13 @@ CREATE TABLE IF NOT EXISTS metrics (
   spread REAL,
   PRIMARY KEY (ts, symbol)
 );
-
 CREATE INDEX IF NOT EXISTS idx_metrics_symbol_ts ON metrics(symbol, ts);
+
+CREATE TABLE IF NOT EXISTS liq_levels (
+  symbol TEXT NOT NULL,
+  bin REAL NOT NULL,
+  usd REAL NOT NULL,
+  updated_ts INTEGER NOT NULL,
+  PRIMARY KEY (symbol, bin)
+);
+CREATE INDEX IF NOT EXISTS idx_liq_levels_symbol_bin ON liq_levels(symbol, bin);
