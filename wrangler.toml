@@ -1,11 +1,16 @@
-name = "crypto-recs"
+# wrangler.toml
+name = "crypto-reco-worker"
 main = "src/worker.ts"
-compatibility_date = "2025-08-01"
+compatibility_date = "2025-09-02"
 
+# Option A (simple): one mapping with prod id + preview id for dev
+[[kv_namespaces]]
+binding = "RECO_CACHE"
+id = "c721361c44244f6b8c7c4b58ef1a5afd"
+preview_id = "876f759c5d50413ba3369d5106438cc4"
 
 [triggers]
-crons = ["*/1 * * * *"] # co minutę
-
+crons = ["*/1 * * * *"]
 
 [vars]
 SYMBOLS = "BTCUSDT,ETHUSDT,SOLUSDT"
@@ -27,3 +32,24 @@ ip = "0.0.0.0"
 port = 8787
 local_protocol = "http"
 
+
+# --- Option B (advanced): named environments ---
+# Uncomment and fill if you use `--env`/`-e` flags.
+#
+# [env.dev]
+# name = "crypto-reco-worker-dev"
+# [[env.dev.kv_namespaces]]
+# binding = "RECO_CACHE"
+# id = "REPLACE_WITH_DEV_KV_ID"
+#
+# [env.production]
+# name = "crypto-reco-worker"
+# [[env.production.kv_namespaces]]
+# binding = "RECO_CACHE"
+# id = "REPLACE_WITH_PROD_KV_ID"
+
+# Helpful CLI:
+#   wrangler kv namespace create RECO_CACHE
+#   wrangler kv namespace create RECO_CACHE --preview
+#   wrangler secret put API_KEY
+#   wrangler deploy
